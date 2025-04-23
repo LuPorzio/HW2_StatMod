@@ -1,0 +1,401 @@
+---
+title: "HOMEWORK 2"
+date: "2025/03/22"
+author: "Luisa Porzio (ID: 255069)"
+format: 
+    pdf:
+      theme: cosmo
+      latex_engine: xelatex
+      number-sections: true
+      
+editor: visual
+---
+
+# **Introduction**
+
+The following analysis is based on diabetes data with the aim of investigate the association between different clinical factors correlated with diabetes progression after 1 year from a baseline, identifying the main predictors among them. The data were collected from 442 diabetic patients.
+
+The main explanatory variables considered are: **progr** (the target variable measuring disease progression. The higher the value, the worse the progression), **age**, **sex**, **BMI** (body mass index), **BP** (average blood pressure, in mm Hg), **TC** (total cholesterol, mg/dl), **LDL** (low-density lipoproteins, mg/dl), **HDL** (high-density lipoproteins, mg/dl), **TCH** (ratio between total cholesterol and HDL), **TG** (triglycerides level, mg/dl, log-scaled), **GC** (blood glucose, mg/dl).
+
+The full code to replicate the analysis is available on [GitHub](https://github.com/LuPorzio/HW1_StatMod/tree/main).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE,
+message=FALSE,
+tidy.opts=list(width.cutoff = 60),
+tidy = TRUE)
+```
+
+```{r, include=FALSE}
+# --- Helper: Compute MSE
+compute_mse <- function(pred, true) {
+  mean((true - pred)^2)
+}
+
+# --- Helper: Tune mtry using OOB error
+cv_rf_mtry <- function(df, tries = 8, seed = 124) {
+  errs <- c()
+  sequence_mtry <- seq(2, tries, 1)
+  
+  for (try in sequence_mtry) {
+    set.seed(seed)
+    rf_model <- randomForest(progr ~ ., data = df, mtry = try, ntree = 500)
+    errs <- c(errs, min(rf_model$mse))  # OOB MSE
+  }
+  
+  best_mtry <- sequence_mtry[which.min(errs)]
+  return(best_mtry)
+}
+```
+
+# Exploratory Analysis
+
+The first step of the analysis is conducting a data pre-processing to check the structure of the data-set. In this instance, there are no missing values.
+
+```{r, include=FALSE}
+#Import the necessary libraries
+library(tidyverse)
+library(xgboost)
+library(ISLR2)
+library(caret)
+library(tidymodels)
+library(kableExtra)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(gridExtra)
+library(ggthemes)
+library(MASS)     
+library(tree)
+library(randomForest)
+library(gbm)
+library(caret)
+```
+
+```{r, include=FALSE}
+data <- read_delim("db.txt", delim = "\t", 
+    escape_double = FALSE, trim_ws = TRUE)
+str(data)
+```
+
+```{r, include=FALSE}
+summary(data)
+```
+
+The only categorical variable is sex, and in order to proceed it is necessary to transform the nature of the variable from `numeric` to `factor`. It is not possible to assign a label to the values of the variable (1,2) given that there are no informations on which value corresponds to male and which to female.
+
+```{r, include=TRUE}
+data <- data %>%
+  mutate(sex = as.factor(sex))
+```
+
+# Model fitting
+
+In the following section the different requested models will be fitted, starting from the Tree Model, followed by the Random Forest and the Boosted Forest. Each model will be deeply and carefully analyzed in order to then draw the conclusions on which model best fits the data which will be available in the last section of this report.
+
+## Tree
+
+In order to fit the tree model it is necessary to tune the necessary hyper-parameters. In this case it is not recomanded to adopt a train/test split given that the used dataset only counts 442 observations. Employing such method would most likely lead to a bad performance of the model that might not accurately learn due to the training set being too small. To avoid this, it is best to fit the model on the whole dataset.
+
+### Full Tree {#sec-full-tree}
+
+```{r}
+full_tree <- tree(progr ~ ., data = data)
+```
+
+```{r, include=FALSE}
+plotting_tree <- function(tree, title) {
+  plot(tree)
+  text(tree, pretty=0, cex=0.8, adj = c(0.5, -0.5))
+  title(main=title)
+}
+```
+
+```{r, echo=FALSE, fig.height=4, fig.width=8}
+plotting_tree(full_tree, 'Full Tree')
+```
+
+However, in order to choose accurately the hyper-parameters it is possible to conduct a cross-validation that helps simulate multiple train/test splits. To do so, we plot the deviance which measures the error and the tree size.
+
+```{r}
+cv_tree <- cv.tree(full_tree)
+```
+
+```{r, echo=FALSE, fig.height=4, fig.width=6}
+plot(cv_tree$size, cv_tree$dev, type = 'b', pch = 21, xlab = 'Tree size', ylab = 'Deviance',  bg="violetred1", col="black",cex=1.5)
+```
+
+From this is is possible to observe that the best size is 5 as it minimizes the deviance in a 10-fold CV setting. Therefore the initial Full Tree in @sec-full-tree can be pruned on the base of this parameter.
+
+### Pruned Tree
+
+```{r}
+pruned_tree <- prune.tree(full_tree, best = 5)
+```
+
+```{r, include=FALSE}
+plotting_tree <- function(tree, title) {
+  plot(tree)
+  text(tree, pretty=0, cex=0.8, adj = c(0.5, -0.5))
+  title(main=title)
+}
+```
+
+```{r, echo=FALSE}
+plotting_tree(pruned_tree, 'Pruned Tree')
+```
+
+We can see from the fitted model and its representation that the tree has 5 terminal nodes, as specified by the pruning condition after we found the optimal size. Importantly, we notice that the model only uses two variables to partition the prediction space into five. The two variables are TG and BMI which have been selected internally by the model since they were minimizing the error.
+
+## Random Forest
+
+If we wanted to add more variance to our model and prevent it from always selecting TG and BMI to perform all the initial splits we can use a Random Forest (RF) model. An RF model is an ensemble model that allows different trees to be fitted on a specific subset of features that is randomly picked by each of them. The number of features that each tree has to select is, therefore, the main hyperparameter to tune for this model. This can be done by exploring different strategies based on multiple re-sampling techniques, but there is one specific strategy that is peculiar to RF models and can be used to save some computational power. Indeed, with RF models each tree is fitted only on some specific observations and, therefore, this characteristic can be used to ask a tree to predict an observation from the dataset that it has not encountered during training. This solves the problem of data leakage as those predictions will be comparable to predictions made on a held-out test set. RF models refer to this error as the Out-of-bag (OOB) error. Using this error to tune the hyper-parameters of the model saves time and assures performances equivalent to performing a k-fold CV.
+
+```{r, echo=FALSE, fig.width=8, fig.height=4}
+par(mfrow=c(2,4))
+
+#try up until the maximum number of features in the df
+tries <- 2:8
+# initiate empty vector to store OOB errors from each iteration
+errors <- c()
+
+for (try in tries) {
+  set.seed(1)
+  ntrees <- 500
+  # fit model with given parameter
+  rand_for <- randomForest(progr~., data = data, 
+             mtry = try, ntree = ntrees,
+             importance = T)
+  
+  # get the OOB error
+  test_error <- rand_for$mse
+  
+  # find optimal size which minimizes the OOB error
+  optimal_size <- seq(1, ntrees, 1)[which.min(rand_for$mse)]
+  
+  # find lowest error
+  lowest_error <- min(test_error)
+  
+  # append the error to the initial vector
+  errors <- append(errors, lowest_error)
+  
+  # plot the results 
+  plot(seq(1, ntrees, 1), test_error, 
+       main = paste('mtry =', try, ", best size:", optimal_size), type = 'l',
+       xlab = 'trees', ylab = 'Test MSE')
+  
+  # add vertical line to show the optimal size
+  abline(v = optimal_size, type = 'l', col = 'violetred2', lw=1)
+
+}
+
+# save results into a table for future reference
+res <- tibble(n_vars = tries, mse = errors)
+```
+
+```{r, echo=FALSE, fig.height=5}
+res %>% 
+  arrange(mse) %>% 
+  kable(format = "latex", booktabs = TRUE, caption = "Evaluating the optimal mtry hyperparameter") %>%
+  kable_styling(latex_options = c("HOLD_position", "scale_down", 'striped'))
+```
+
+From the table above it is possible to see that the best number of variables to be considered for each split is 4. However, that is achieved with a RF model with a size of 354. By looking at the plots, however, it is possible to see that the lowest error when mtry is set to 2 is very close in terms of performance to the MSE when mtry is set to 4. Moreover, simplifying to a model having 2 variables for each tree is also the fastest way to achieve the lowest MSE as the model reaches that level of performance after fitting 221 trees out of the total 500 trees.
+
+```{r, include=FALSE}
+set.seed(1)
+rand_for <- randomForest(progr~., data = data,
+             mtry = 2, importance = T)
+```
+
+```{r,echo=FALSE}
+varImpPlot(rand_for, main = 'Variable Importance', pch=21, bg="violetred1", col="black", cex=1)
+```
+
+The importance of each variable can be observed from the plots above. In the plot on the left we can see that the increase in MSE in case the variables BMI and TG were to be substitued by another predictor is very high (around 60% when combined). This means that these variables are truly important for the model and that it relies on them for making the best predictions. In the plot on the right, this idea is confirmed since the increase in node purity when these values are added to a tree is very high compared to all the others.
+
+## Boosted Models
+
+### Alternative 1 {#sec-alternative-1}
+
+Another model that can be fitted to provide an alternative solution to this regression task is a **boosted regression tree model**. This model follows an approach that is different from a RF. In this case the model is built sequentially and each tree has a chance to learn from the errors (residuals) made by its predecessors. This allows the model to become very efficient at recognizing specific patterns while retaining some flexibility to review its optimization process along the way. In this case, the number of iterations, and therefore the number of trees that are built sequentially, is the most important hyperparameter to tune. For this study, a sequence of numbers from 50 to 5000 in steps of 50 (e.g. 50, 100, 150, ...) were tried as possible candidates.
+
+```{r, include=FALSE}
+# Set up training control for 10-fold CV
+control <- trainControl(method = "cv", number = 10)
+
+# Define grid of parameters to search
+grid <- expand.grid(
+  interaction.depth = 1,
+  n.trees = seq(50, 5000, 50),
+  shrinkage = 0.1,
+  n.minobsinnode = 10
+)
+
+```
+
+```{r, include=FALSE}
+# Train with grid search + CV
+set.seed(1)
+model <- train(progr ~ ., data = data, method = "gbm",
+  trControl = control, tuneGrid = grid, verbose = FALSE)
+```
+
+```{r, echo=FALSE, fig.height=3.70, fig.width=6}
+plot(model, pch=21, col="violetred1", cex=1)
+```
+
+```{r, include=FALSE}
+print(model)
+```
+
+Based on the root mean squared error from CV we can say that the best choice for the `n.trees` parameter among those tried is 150. This is the value that minimizes the CV error measured through RMSE. Importantly, we also notice that after the optimal number of iterations the RMSE of the model starts to increase, thus suggesting that the model is now fitting noise that is lowering the quality of its predictions.
+
+### Alternative 2
+
+In alternative to using a random sequence of numbers to tune the number of iterations, it is possible to directly use the `gbm` function that uses in this case a 10-fold CV. This should give a more specific estimate for the hyper-parameter.
+
+```{r}
+set.seed(1)
+boosted <- gbm(progr ~ ., distribution = 'gaussian', data = data, n.trees = 5000, cv.folds = 10)
+```
+
+```{r, echo=FALSE, fig.height=3.5}
+best_iter_num <- gbm.perf(boosted, plot.it = T)
+```
+
+From the plot above it seems that after performing a 10-fold CV the best number of iterations is 137, which corroborates the result from @sec-alternative-1 , as 150 was the closest number to 137 among those used. This is due to the fact that the model appears to reach its best performance after a relatively low number of iterations. Interestingly, increasing the number of iterations seems to be adding noise to the model whose error (as measured by the squared error loss) starts increasing shortly after the optimal number of iterations found.
+
+```{r}
+boosted_tuned <- gbm(progr ~ ., distribution = 'gaussian', data = data, n.trees = best_iter_num, cv.folds = 10)
+```
+
+## Variables Importance {#sec-variables-importance}
+
+```{r, fig.height=7, include=FALSE}
+sumr <- summary(boosted_tuned)
+```
+
+```{r, fig.height=4, echo=FALSE}
+sumr <- summary(boosted_tuned, plotit = FALSE)
+
+sumr <- sumr[order(sumr$rel.inf, decreasing = FALSE), ]
+colors <- colorRampPalette(c("pink","pink1", "palevioletred1", "palevioletred2", "palevioletred3", "palevioletred4"))(nrow(sumr))
+
+barplot(
+  sumr$rel.inf,
+  names.arg = sumr$var,
+  horiz=TRUE,
+  col = colors,
+  las = 2,
+  main = "Variable Importance (GBM)",
+  xlab = "Relative Influence"
+)
+```
+
+From the relative influence plot above we can form an idea as to what are the main predictors that influence the outputs of the model. Unsurprisingly, we see that also in this model the BMI and TG variables cover a predominant role compared to all other variables available in the dataset.
+
+# Model selection
+
+In this section, we compare all the models fitted so far and we perform further experiments to select the best model for this specific task. The main procedure that will be followed in this section is the following:
+
+1.  perform a 10-fold cross validation
+2.  in each iteration the model is trained on the train data and the hyper-parameters are adjusted based solely on those
+3.  the MSE is computed for each iteration on the unseen test fold of the dataset
+4.  at the end the average MSE is computed for each model and the model with the lowest average MSE is picked
+
+```{r, include=FALSE}
+# Main function
+compare_models_cv <- function(df, k = 10, seed = 1) {
+  set.seed(seed)
+  n <- nrow(df)
+  folds <- sample(rep(1:k, length.out = n))
+
+  mse_tree <- mse_rf <- mse_gbm <- c()
+  
+  for (fold in 1:k) {
+    train_idx <- which(folds != fold)
+    test_idx  <- which(folds == fold)
+
+    train_df <- df[train_idx, ]
+    test_df  <- df[test_idx, ]
+    y_test <- test_df$progr
+
+    ## --- Decision Tree with pruning via CV ---
+    tree_model <- tree(progr ~ ., data = data, subset = train_idx)
+    cv_result <- cv.tree(tree_model)
+    best_size <- cv_result$size[which.min(cv_result$dev)]
+    pruned_tree <- prune.tree(tree_model, best = best_size)
+    pred_tree <- predict(pruned_tree, newdata = test_df)
+    mse_tree <- c(mse_tree, compute_mse(pred_tree, y_test))
+
+    ## --- Random Forest with best mtry via OOB ---
+    mtry_candidates <- 1:(ncol(df) - 1)
+    oob_errors <- sapply(mtry_candidates, function(m) {
+      model <- randomForest(progr ~ ., data = train_df, mtry = m, ntree = 500)
+      model$mse[500]  # OOB MSE at final tree
+    })
+    best_mtry <- mtry_candidates[which.min(oob_errors)]
+    rf_model <- randomForest(progr ~ ., data = train_df, mtry = best_mtry, ntree = 500)
+    pred_rf <- predict(rf_model, newdata = test_df)
+    mse_rf <- c(mse_rf, compute_mse(pred_rf, y_test))
+
+    ## --- Boosting with best n.trees via internal CV ---
+    gbm_model_cv <- gbm(
+      formula = progr ~ .,
+      data = train_df,
+      distribution = "gaussian",
+      n.trees = 2000,
+      interaction.depth = 1,
+      shrinkage = 0.01,
+      cv.folds = 5,
+      verbose = FALSE
+    )
+    best_iter <- gbm.perf(gbm_model_cv, method = "cv", plot.it = FALSE)
+    gbm_final <- gbm(
+      formula = progr ~ .,
+      data = train_df,
+      distribution = "gaussian",
+      n.trees = best_iter,
+      interaction.depth = 1,
+      shrinkage = 0.01,
+      verbose = FALSE
+    )
+    pred_gbm <- predict(gbm_final, newdata = test_df, n.trees = best_iter)
+    mse_gbm <- c(mse_gbm, compute_mse(pred_gbm, y_test))
+  }
+
+  return(list(
+    cv_mse_tree = mean(mse_tree),
+    cv_mse_forest = mean(mse_rf),
+    cv_mse_boost = mean(mse_gbm)
+  ))
+}
+
+```
+
+```{r, include=FALSE}
+results <- compare_models_cv(data, k = 10, seed = 1)
+```
+
+```{r, include=FALSE}
+results_tab <- tibble('model' = c('tree', 'RF', 'Boosted'),
+       'CV_MSE' = c(results$cv_mse_tree, results$cv_mse_forest, results$cv_mse_boost))
+```
+
+```{r, echo=FALSE, fig.height=3}
+colors <- c("palevioletred4", "palevioletred1", "pink")
+barplot(CV_MSE ~ model, data = results_tab,
+        xlab = 'Model', ylab = 'MSE on 10-fold CV', col=colors)
+```
+
+After performing a 10-fold CV the boosted model seems to be performing better compared to the simple tree model and the RF model. Indeed, the results indicate that the **boosted model** outperforms both the **single decision tree** and the **random forest**, demonstrating its superior predictive performance. Additionally, the **random forest** shows improved performance over the single tree model, highlighting its greater flexibility and effectiveness when properly tuned.
+
+# Conclusion
+
+The main conclusions drawn from this analysis will be now discussed. First, few features stand out as particularly important for understanding the progression of diabetes over time. As discussed in @sec-variables-importance, **Body Mass Index** (**BMI)** and **triglycerides (TG)** consistently outperformed other predictors. Therefore, it is possible to consider these two clinical factors as the most important ones, to which diabetes patients should pay more attention compared to other factors that such as sex that has a lesser impact on the development of the disease.
+
+Moreover, this task favors models that learn sequentially (incrementally correcting previous errors) over more flexible, high-variance models like random forests. This is likely due to the relatively low number of dominant predictors, which aligns well with the strengths of boosting algorithms.
+
+However, it's important to note that boosting is also more computationally intensive. In larger datasets, random forests may be preferred despite slightly lower predictive performance, as their parallelizable structure makes them more efficient to train at scale.
