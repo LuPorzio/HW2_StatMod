@@ -17,7 +17,7 @@ The following analysis is based on diabetes data with the aim of investigate the
 
 The main explanatory variables considered are: **progr** (the target variable measuring disease progression. The higher the value, the worse the progression), **age**, **sex**, **BMI** (body mass index), **BP** (average blood pressure, in mm Hg), **TC** (total cholesterol, mg/dl), **LDL** (low-density lipoproteins, mg/dl), **HDL** (high-density lipoproteins, mg/dl), **TCH** (ratio between total cholesterol and HDL), **TG** (triglycerides level, mg/dl, log-scaled), **GC** (blood glucose, mg/dl).
 
-The full code to replicate the analysis is available on [GitHub](https://github.com/LuPorzio/HW1_StatMod/tree/main).
+The full code to replicate the analysis is available on [GitHub](https://github.com/LuPorzio/HW2_StatMod).
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(warning=FALSE,
